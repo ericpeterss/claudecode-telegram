@@ -2,7 +2,12 @@
 # Claude Code Stop hook - sends response back to Telegram
 # Install: copy to ~/.claude/hooks/ and add to ~/.claude/settings.json
 
-TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-YOUR_BOT_TOKEN_HERE}"
+# Read token from environment (set TELEGRAM_BOT_TOKEN in your shell profile)
+if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+  TELEGRAM_BOT_TOKEN=$(grep 'export TELEGRAM_BOT_TOKEN=' ~/.zshrc 2>/dev/null | tail -1 | sed 's/.*="\(.*\)"/\1/')
+fi
+export TELEGRAM_BOT_TOKEN
+
 INPUT=$(cat)
 TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path')
 CHAT_ID_FILE=~/.claude/telegram_chat_id
@@ -12,6 +17,7 @@ PENDING_FILE=~/.claude/telegram_pending
 [ ! -f "$PENDING_FILE" ] && exit 0
 
 PENDING_TIME=$(cat "$PENDING_FILE" 2>/dev/null)
+PENDING_STAMP="$PENDING_TIME"
 NOW=$(date +%s)
 [ -z "$PENDING_TIME" ] || [ $((NOW - PENDING_TIME)) -gt 600 ] && rm -f "$PENDING_FILE" && exit 0
 [ ! -f "$CHAT_ID_FILE" ] || [ ! -f "$TRANSCRIPT_PATH" ] && rm -f "$PENDING_FILE" && exit 0
@@ -21,16 +27,33 @@ LAST_USER_LINE=$(grep -n '"type":"user"' "$TRANSCRIPT_PATH" | tail -1 | cut -d: 
 [ -z "$LAST_USER_LINE" ] && rm -f "$PENDING_FILE" && exit 0
 
 TMPFILE=$(mktemp)
-tail -n "+$LAST_USER_LINE" "$TRANSCRIPT_PATH" | \
-  grep '"type":"assistant"' | \
-  jq -rs '[.[].message.content[] | select(.type == "text") | .text] | join("\n\n")' > "$TMPFILE" 2>/dev/null
 
-[ ! -s "$TMPFILE" ] && rm -f "$TMPFILE" "$PENDING_FILE" && exit 0
+# Retry loop: wait up to 5s for assistant text to appear in transcript
+# (Stop hook can fire before the transcript is fully written)
+for i in 1 2 3 4 5; do
+  tail -n "+$LAST_USER_LINE" "$TRANSCRIPT_PATH" | \
+    grep '"type":"assistant"' | \
+    jq -rs '[.[].message.content[] | select(.type == "text") | .text] | join("\n\n")' > "$TMPFILE" 2>/dev/null
+  # Check file has actual content (jq outputs "\n" even with no results)
+  CONTENT=$(cat "$TMPFILE" 2>/dev/null | tr -d '\n')
+  [ -n "$CONTENT" ] && [ "$CONTENT" != "null" ] && break
+  sleep 1
+done
 
-python3 - "$TMPFILE" "$CHAT_ID" "$TELEGRAM_BOT_TOKEN" << 'PYEOF'
-import sys, re, json, urllib.request
+CONTENT=$(cat "$TMPFILE" 2>/dev/null | tr -d '\n')
+if [ -z "$CONTENT" ] || [ "$CONTENT" = "null" ]; then
+  rm -f "$TMPFILE"
+  CURRENT_STAMP=$(cat "$PENDING_FILE" 2>/dev/null)
+  [ "$CURRENT_STAMP" = "$PENDING_STAMP" ] && rm -f "$PENDING_FILE"
+  exit 0
+fi
 
-tmpfile, chat_id, token = sys.argv[1], sys.argv[2], sys.argv[3]
+python3 - "$TMPFILE" "$CHAT_ID" << 'PYEOF'
+import sys, re, json, urllib.request, os
+
+tmpfile, chat_id = sys.argv[1], sys.argv[2]
+token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+
 with open(tmpfile) as f:
     text = f.read().strip()
 
@@ -70,5 +93,7 @@ if not send(text, "HTML"):
         send(f.read()[:4096])
 PYEOF
 
-rm -f "$TMPFILE" "$PENDING_FILE"
+rm -f "$TMPFILE"
+CURRENT_STAMP=$(cat "$PENDING_FILE" 2>/dev/null)
+[ "$CURRENT_STAMP" = "$PENDING_STAMP" ] && rm -f "$PENDING_FILE"
 exit 0

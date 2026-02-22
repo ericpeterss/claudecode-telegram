@@ -16,6 +16,7 @@ PENDING_FILE = os.path.expanduser("~/.claude/telegram_pending")
 HISTORY_FILE = os.path.expanduser("~/.claude/history.jsonl")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8080"))
+ALLOWED_CHAT_ID = int(os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", "0"))
 
 BOT_COMMANDS = [
     {"command": "clear", "description": "Clear conversation"},
@@ -132,6 +133,8 @@ class Handler(BaseHTTPRequestHandler):
     def handle_callback(self, cb):
         chat_id = cb.get("message", {}).get("chat", {}).get("id")
         data = cb.get("data", "")
+        if ALLOWED_CHAT_ID and chat_id != ALLOWED_CHAT_ID:
+            return
         telegram_api("answerCallbackQuery", {"callback_query_id": cb.get("id")})
 
         if not tmux_exists():
@@ -163,6 +166,8 @@ class Handler(BaseHTTPRequestHandler):
         msg = update.get("message", {})
         text, chat_id, msg_id = msg.get("text", ""), msg.get("chat", {}).get("id"), msg.get("message_id")
         if not text or not chat_id:
+            return
+        if ALLOWED_CHAT_ID and chat_id != ALLOWED_CHAT_ID:
             return
 
         with open(CHAT_ID_FILE, "w") as f:
@@ -249,9 +254,6 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[{chat_id}] {text[:50]}...")
         with open(PENDING_FILE, "w") as f:
             f.write(str(int(time.time())))
-
-        if msg_id:
-            telegram_api("setMessageReaction", {"chat_id": chat_id, "message_id": msg_id, "reaction": [{"type": "emoji", "emoji": "\u2705"}]})
 
         if not tmux_exists():
             self.reply(chat_id, "tmux not found")
